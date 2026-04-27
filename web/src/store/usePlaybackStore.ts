@@ -1,12 +1,19 @@
 import { create } from 'zustand';
 import telemetryData from '@/data/processed_telemetry.json';
 import solutionsData from '@/data/solutions.json';
+import aiPredictions from '@/data/ai_predictions.json';
 
 interface TelemetryFrame {
   timestamp: number;
   joints: number[];
+  currents: number[];
   is_fault: boolean;
   fault_code: string;
+}
+
+interface AIPrediction {
+  is_anomaly: boolean;
+  confidence: number;
 }
 
 interface Solution {
@@ -16,20 +23,18 @@ interface Solution {
 }
 
 interface PlaybackState {
-  // Data
   telemetry: TelemetryFrame[];
+  aiPredictions: AIPrediction[];
   solutions: Record<string, Solution>;
   
-  // Playback Control
   currentIndex: number;
   isPlaying: boolean;
   playbackSpeed: number;
   
-  // Derived State
   currentFrame: TelemetryFrame;
+  currentAI: AIPrediction;
   activeSolution: Solution | null;
 
-  // Actions
   setIndex: (index: number) => void;
   togglePlay: () => void;
   setSpeed: (speed: number) => void;
@@ -38,27 +43,39 @@ interface PlaybackState {
 
 export const usePlaybackStore = create<PlaybackState>((set, get) => ({
   telemetry: telemetryData as TelemetryFrame[],
+  aiPredictions: aiPredictions as AIPrediction[],
   solutions: solutionsData as Record<string, Solution>,
   currentIndex: 0,
   isPlaying: false,
   playbackSpeed: 1,
   currentFrame: telemetryData[0] as TelemetryFrame,
+  currentAI: aiPredictions[0] as AIPrediction,
   activeSolution: null,
 
   setIndex: (index: number) => {
-    const frame = telemetryData[index] as TelemetryFrame;
-    const solution = frame.fault_code ? (solutionsData as any)[frame.fault_code] : null;
+    const { telemetry, aiPredictions, solutions, currentIndex } = get();
+    if (index < 0 || index >= telemetry.length) return;
+
+    const frame = telemetry[index];
+    const prevFrame = telemetry[currentIndex];
+    const ai = aiPredictions[index];
+    const solution = (frame && frame.fault_code) ? (solutions as any)[frame.fault_code] : null;
+    
+    if (!frame || !ai) return;
+
+    // Only auto-pause if we just transitioned from NO-FAULT to FAULT
+    const shouldAutoPause = frame.is_fault && (!prevFrame || !prevFrame.is_fault);
+
     set({ 
       currentIndex: index, 
       currentFrame: frame,
+      currentAI: ai,
       activeSolution: solution,
-      // Auto-pause on fault entry if we were playing
-      isPlaying: frame.is_fault ? false : get().isPlaying 
+      isPlaying: shouldAutoPause ? false : get().isPlaying 
     });
   },
 
   togglePlay: () => set((state) => ({ isPlaying: !state.isPlaying })),
-  
   setSpeed: (speed: number) => set({ playbackSpeed: speed }),
 
   nextFrame: () => {
