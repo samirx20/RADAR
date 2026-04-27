@@ -1,0 +1,22 @@
+# Dependency Directories
+venv/
+node_modules/
+.next/
+dist/
+build/
+.env*
+__pycache__/
+*.pyc
+
+# Large Data Files (Protect GitHub limits)
+data/*.csv
+data/*.zip
+web/src/data/processed_telemetry.json
+
+# OS Files
+.DS_Store
+Thumbs.db
+
+# IDEs
+.vscode/
+.idea/

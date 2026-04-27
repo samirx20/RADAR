@@ -1,0 +1,7 @@
+{
+  "C153A2": {
+    "title": "Joint 2 Overcurrent",
+    "solution": "Check payload weight, inspect for physical collisions, and verify the power supply to the shoulder joint.",
+    "highlight_joint": "shoulder_pan_joint"
+  }
+}
