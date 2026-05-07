@@ -29,15 +29,20 @@ export function Timeline() {
   useEffect(() => {
     if (isPlaying) {
       timerRef.current = setInterval(() => {
-        nextFrame();
-      }, 1000 / (30 * playbackSpeed));
+        const { currentIndex, telemetry, setIndex } = usePlaybackStore.getState();
+        if (currentIndex < telemetry.length - 1) {
+          setIndex(currentIndex + 1);
+        } else {
+          usePlaybackStore.setState({ isPlaying: false });
+        }
+      }, 16);
     } else {
       if (timerRef.current) clearInterval(timerRef.current);
     }
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
     };
-  }, [isPlaying, nextFrame, playbackSpeed]);
+  }, [isPlaying]);
 
   return (
     <div className="flex items-center w-full gap-4 px-4 py-2 bg-secondary/30 rounded-lg border shadow-sm relative overflow-hidden">
@@ -78,7 +83,10 @@ export function Timeline() {
           value={[currentIndex]}
           max={telemetry.length - 1}
           step={1}
-          onValueChange={(val) => setIndex(val[0])}
+          onValueChange={(val) => {
+              const arr = val as number[];
+              setIndex(arr[0]);
+            }}
           className="cursor-pointer relative z-10"
         />
       </div>

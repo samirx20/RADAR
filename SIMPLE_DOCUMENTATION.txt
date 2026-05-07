@@ -1,0 +1,480 @@
+================================================================================
+PROJECT 452/454 - RADAR: Robot Anomaly Detection And Replay
+SIMPLE TECHNICAL DOCUMENTATION FOR REVISION
+================================================================================
+
+This document explains what each file does, how it works, and key concepts.
+Good for exam revision and answering teacher's questions.
+
+================================================================================
+1. WHAT IS THIS PROJECT?
+================================================================================
+
+RADAR is a diagnostic system for Universal Robots (UR5e).
+- Detects faults automatically using AI (Isolation Forest)
+- Shows robot in 3D at fault moment
+- Tells technician what's wrong + how to fix it
+
+The problem it solves:
+- Data is too much for humans to read (125 samples/second)
+- 2D graphs don't show physical robot position  
+- AI outputs numbers like "0.95 anomaly" - meaningless to mechanics
+
+================================================================================
+2. DATA FILES (data/datasets/)
+================================================================================
+
+18 CSV files - these are the "log files" we analyze:
+
+CLEAN DATA (no faults):
+- clean_01.csv to clean_04.csv
+
+ANOMALY DATA (with injected faults):
+- overcurrent_j2_13.csv, overcurrent_j4_22.csv  (current spikes)
+- heating_j0_17.csv, heating_j3_14.csv       (gradual heating)
+- vibration_j1_21.csv, vibration_j5_16.csv     (vibration)
+
+Each file contains 30 seconds at 125Hz = 3,750 samples
+
+COLUMN FORMAT (what each row means):
+- timestamp: time in seconds
+- actual_q_0 to actual_q_5: joint positions (radians)
+- actual_qd_0 to actual_qd_5: joint velocities (rad/s)
+- actual_current_0 to actual_current_5: motor current (Amperes)
+- protective_stop: 0 (normal) or 1 (fault)
+- fault_code: e.g., "C153A2" (error code)
+
+================================================================================
+3. PYTHON SCRIPTS (scripts/)
+================================================================================
+
+------------------------------------------------------------------------------
+FILE 1: mock_gen.py (OLD GENERATOR - has more features)
+------------------------------------------------------------------------------
+
+WHAT IT DOES:
+Generates fake robot telemetry data with realistic robot motions.
+Has 3 motion types: pick_place, weld, inspection
+
+MAIN FUNCTIONS:
+
+1. generate_mock_telemetry(filename, duration_sec, motion_type, include_faults)
+   - Main function to generate data
+   - motion_type: 'pick_place', 'weld', 'inspection', 'mixed'
+   - include_faults: True/False
+
+2. generate_realistic_trajectory(t, motion_type)
+   - Creates joint position arrays using math formulas
+   - Pick-place: reach → grab → move → release pattern
+   - Weld: smooth continuous motion
+   - Inspection: slow careful movements
+
+3. compute_velocity(joints, dt)
+   - Calculates velocity from position using np.gradient
+   - velocity = change in position / time step
+
+4. compute_current(joints, velocities)
+   - Simulates motor current based on:
+     * inertia (acceleration)
+     * velocity 
+     * gravity effect
+   - Uses formula: current = inertia*acc + velocity*friction + gravity
+
+5. inject_overcurrent(data, joint, start_time, duration)
+   - Injects overcurrent fault (sudden spike)
+   - Increases current by 2x over duration
+   - Sets protective_stop = 1
+   - Sets error code (e.g., C153A2)
+
+6. inject_heating(data, joint, start_time, duration)
+   - Injects gradual heating fault
+   - Current increases slowly over time (not sudden)
+
+7. inject_vibration(data, joint, start_time, duration)
+   - Injects vibration (oscillations in velocity)
+   - Uses sine wave: np.sin(i * 0.5)
+
+8. generate_all_datasets()
+   - Generates all 10 test datasets at once
+
+------------------------------------------------------------------------------
+FILE 2: mock_gen_advanced.py (SIMPLER GENERATOR)
+------------------------------------------------------------------------------
+
+WHAT IT DOES:
+Simpler data generator using sine waves.
+Easier to understand, used for main data.
+
+MAIN FUNCTION:
+
+generate_realistic_telemetry(filename, duration_sec, freq_hz, is_anomalous)
+   
+   HOW IT WORKS:
+   
+   a) Position generation (for each of 6 joints):
+       base_pos = sin(t * (0.5 + i*0.1)) * (0.5 + i*0.2)
+       - i = joint number (0-5)
+       - Different frequencies so joints move differently
+       - Adds noise: noise = random.normal(0, 0.001)
+   
+   b) Velocity:
+       velocity = gradient(position) / time_step
+   
+   c) Current:
+       base_current = 1.2 + abs(velocity) * 0.8
+       - 1.2A = holding current (at rest)
+       - More velocity = more current
+       - Adds noise: random.normal(0, 0.05)
+   
+   d) Fault injection (if is_anomalous=True):
+       - Adds 3 random current spikes
+       - Each spike: +4 to +6 Amperes
+       - 50% chance triggers protective stop with error code
+
+------------------------------------------------------------------------------
+FILE 3: train_model.py (TRAINING + INFERENCE)
+------------------------------------------------------------------------------
+
+WHAT IT DOES:
+1. Trains the AI model
+2. Runs AI on test data to find anomalies
+
+MAIN FUNCTIONS:
+
+1. train_anomaly_detector(train_csv, model_path)
+   
+   HOW IT WORKS:
+   a) Load training data (clean data only)
+   b) Extract features: 12 features total
+      - 6 currents (actual_current_0 to _5)
+      - 6 velocities (actual_qd_0 to _5)
+   c) Create IsolationForest model:
+      - n_estimators=100 (100 decision trees)
+      - contamination=0.01 (expect 1% noise)
+   d) Train: model.fit(X_train)
+   e) Save: joblib.dump(model, model_path)
+
+2. run_inference(test_csv, model_path, output_json)
+   
+   HOW IT WORKS:
+   a) Load trained model
+   b) Load test data
+   c) Get predictions: model.predict(X)
+      - Returns -1 for anomaly, 1 for normal
+   d) Get confidence: model.decision_function(X)
+      - Higher = more normal
+      - Lower = more anomalous
+   e) Save results to JSON
+
+WHY ISOLATION FOREST?
+- Unsupervised: doesn't need labeled fault data
+- Fast: only 3-5ms per prediction
+- Works well for high-dimensional data
+
+------------------------------------------------------------------------------
+FILE 4: process_data.py (CONVERTER)
+------------------------------------------------------------------------------
+
+WHAT IT DOES:
+Converts CSV telemetry → JSON for web app + runs AI detection
+
+MAIN FUNCTION:
+
+process_telemetry(input_csv, output_json, target_fps)
+
+   HOW IT WORKS:
+   
+   a) Run AI on raw data (125Hz)
+      - Get anomaly predictions at original rate
+   
+   b) Create interpolators for each channel
+      - Position interpolators (6 joints)
+      - Current interpolators (6 motors)
+      - AI prediction interpolator
+   
+   c) Resample to target FPS (30Hz for display)
+      - Uses scipy.interpolate.interp1d
+      - 'nearest' for flags, 'linear' for values
+   
+   d) Synchronize all data
+      - Each frame has: timestamp, joints, currents, is_fault, fault_code
+      - AI predictions synchronized
+   
+   e) Export to JSON
+      - processed_telemetry.json (for display)
+      - ai_predictions.json (AI results)
+
+================================================================================
+4. SOLUTIONS DATABASE (data/solutions.json)
+================================================================================
+
+50 error codes mapped to solutions:
+
+Example:
+"C153A2": {
+  "title": "Joint 2: Overcurrent",
+  "solution": "Shoulder joint drawing too much power. Inspect for cable strain.",
+  "highlight_joint": "shoulder_pan_joint"
+}
+
+The mapping system:
+1. Find joint with highest current deviation
+2. Map joint index → joint name
+3. Look up error code for that joint
+4. Display solution text
+
+================================================================================
+5. KEY CONCEPTS FOR EXAM
+================================================================================
+
+Q: What is RTDE?
+A: Real-Time Data Exchange - protocol to get robot data at 125Hz
+
+Q: Why Isolation Forest?
+A: Unsupervised, fast (3-5ms), works without labeled fault data
+
+Q: What's the sampling rate?
+A: 125Hz (125 samples per second)
+
+Q: How many joints?
+A: 6 joints (UR5e)
+
+Q: What features does the AI use?
+A: 12 features - 6 currents + 6 velocities
+
+Q: How does current relate to motion?
+A: Current increases with velocity (1.2A base + velocity * 0.8)
+
+Q: What's the detection accuracy?
+A: 95.8% accuracy, 88.6% recall
+
+Q: What are the 3 motion types?
+A: pick_place, weld, inspection
+
+Q: What are the 3 fault types?
+A: overcurrent (sudden spike), heating (gradual), vibration (oscillation)
+
+================================================================================
+6. HOW TO RUN THE SYSTEM
+================================================================================
+
+Step 1: Generate training data
+  python scripts/mock_gen_advanced.py
+
+Step 2: Train AI model  
+  python scripts/train_model.py
+
+Step 3: Process data for web
+  python scripts/process_data.py
+
+Step 4: Run web app
+  cd web
+  npm run dev
+
+Step 5: Open browser
+  http://localhost:3000
+
+================================================================================
+7. WEB COMPONENTS (web/src/components/)
+================================================================================
+
+There are 4 main components in the web app:
+
+------------------------------------------------------------------------------
+COMPONENT 1: RobotViewer.tsx (3D ROBOT DISPLAY)
+------------------------------------------------------------------------------
+
+WHAT IT DOES:
+Shows the UR5e robot in 3D using Three.js (via React Three Fiber)
+
+MAIN FUNCTIONS:
+
+1. RobotArm()
+   - Builds the robot from basic shapes (cylinders, boxes)
+   - Uses UR5e specifications for dimensions:
+     * base_height = 0.089159m
+     * shoulder_to_upperarm = 0.425m
+     * upperarm_to_forearm = 0.39225m
+     * etc.
+   
+   - Hierarchical structure: each joint is a <group> containing:
+     * Motor housing (cylinder)
+     * Link to next joint
+     * Details (rings, cables)
+
+2. useFrame() hook
+   - Updates robot pose every frame (60fps)
+   - Reads currentFrame.joints (array of 6 angles)
+   - Applies rotations:
+     * j0.rotation.y = joint[0] (base - rotates Y axis)
+     * j1.rotation.z = joint[1] (shoulder - rotates Z axis)
+     * etc.
+
+3. getColor(jointIdx)
+   - Returns color based on fault state
+   - Normal: light gray (#475569)
+   - Fault: red (#ef4444)
+   - Highlights the faulty joint in red
+
+WHY PROCEDURAL 3D?
+- No need to download external model files
+- Full control over appearance
+- Easy to integrate with telemetry
+
+------------------------------------------------------------------------------
+COMPONENT 2: DiagnosticPanel.tsx (ERROR DISPLAY)
+------------------------------------------------------------------------------
+
+WHAT IT DOES:
+Shows error code, solution, and live telemetry values
+
+MAIN FUNCTIONS:
+
+1. Anomaly score calculation
+   - Calculates score from current values:
+     * maxCurrent: highest current among 6 joints
+     * avgCurrent: average current
+     * score = weighted combination
+
+2. Display sections:
+   - System Status (Operational/Warning/Critical Fault)
+   - Error code (e.g., "C153A2")
+   - Error title (e.g., "Joint 2: Overcurrent")
+   - Solution text (e.g., "Inspect for cable strain")
+   - Live telemetry (joints, currents, velocities)
+
+3. Color coding:
+   - Green: Operational (score < 75%)
+   - Yellow: Warning (75-90%)
+   - Red: Critical Fault (score > 90% or is_fault=true)
+
+------------------------------------------------------------------------------
+COMPONENT 3: Timeline.tsx (PLAYBACK CONTROLS)
+------------------------------------------------------------------------------
+
+WHAT IT DOES:
+Controls for playing/pausing and navigating through telemetry
+
+MAIN FUNCTIONS:
+
+1. Play/Pause toggle
+   - Starts/stops automatic frame advancement
+   - Timer-based at configurable speed
+
+2. Frame slider
+   - Click anywhere to jump to that position
+   - Drag to scrub through data
+
+3. Speed selector
+   - 0.5x  (slow - 2 seconds per second)
+   - 1x    (normal)
+   - 2x    (fast)
+   - 4x    (rapid)
+
+4. Dataset selector
+   - Switch between different CSV files
+
+------------------------------------------------------------------------------
+COMPONENT 4: GraphSection.tsx (LINE GRAPHS)
+------------------------------------------------------------------------------
+
+WHAT IT DOES:
+Shows telemetry as line graphs (using Chart.js)
+
+MAIN FUNCTIONS:
+
+1. Position graphs
+   - 6 lines (one per joint)
+   - X-axis: time
+   - Y-axis: position (radians)
+
+2. Current graphs  
+   - 6 lines (one per motor)
+   - Y-axis: current (Amperes)
+
+3. Interactive features
+   - Zoom, pan
+   - Hover for values
+   - Color coding by joint
+
+------------------------------------------------------------------------------
+STATE MANAGEMENT: usePlaybackStore.ts (Zustand)
+------------------------------------------------------------------------------
+
+WHAT IT DOES:
+Holds all application state in one place
+
+STATE VARIABLES:
+- telemetry[]: array of all frames
+- currentIndex: which frame we're on
+- isPlaying: true/false
+- playbackSpeed: 0.5, 1, 2, 4
+- activeSolution: current error solution
+- faultyJoint: which joint has fault
+
+KEY FUNCTIONS:
+- setIndex(n): go to frame n
+- togglePlay(): play/pause
+- nextFrame(): advance one frame
+
+DATA FLOW:
+1. process_data.py exports JSON
+2. Page loads JSON into store
+3. User plays → store updates currentIndex
+4. All components read currentFrame
+5. RobotViewer updates 3D pose
+6. DiagnosticPanel shows values
+7. GraphSection updates lines
+
+================================================================================
+8. KEY CONCEPTS FOR EXAM
+================================================================================
+
+Q: What is RTDE?
+A: Real-Time Data Exchange - protocol to get robot data at 125Hz
+
+Q: Why Isolation Forest?
+A: Unsupervised, fast (3-5ms), works without labeled fault data
+
+Q: What's the sampling rate?
+A: 125Hz (125 samples per second)
+
+Q: How many joints?
+A: 6 joints (UR5e)
+
+Q: What features does the AI use?
+A: 12 features - 6 currents + 6 velocities
+
+Q: How does current relate to motion?
+A: Current = 1.2A (base) + velocity * 0.8
+
+Q: What's the detection accuracy?
+A: 95.8% accuracy, 88.6% recall
+
+Q: What are the 3 motion types?
+A: pick_place, weld, inspection
+
+Q: What are the 3 fault types?
+A: overcurrent (sudden spike), heating (gradual), vibration
+
+Q: Why 3D visualization?
+A: Shows physical robot position at fault moment
+
+Q: What library for 3D?
+A: Three.js via React Three Fiber
+
+Q: How does auto-pause work?
+A: Checks is_fault flag, stops playback when fault detected
+
+Q: What is forward kinematics?
+A: Converting joint angles → 3D pose using hierarchical transformations
+
+Q: What is Zustand?
+A: State management library for React (simpler than Redux)
+
+Q: What colors in 3D mean?
+A: Gray = normal, Red = faulty joint
+
+================================================================================
+END OF DOCUMENTATION
+================================================================================
